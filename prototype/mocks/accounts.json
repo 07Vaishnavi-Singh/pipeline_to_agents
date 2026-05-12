@@ -1,0 +1,29 @@
+[
+  {
+    "id": "acct_stripe",
+    "name": "Stripe",
+    "domain": "stripe.com",
+    "stage": "Evaluation",
+    "health": "strong",
+    "signals": ["new payments API launch", "hiring Solutions Engineers"],
+    "suggested_next_question": "Do they have an active POC owner on the analytics side?"
+  },
+  {
+    "id": "acct_notion",
+    "name": "Notion",
+    "domain": "notion.so",
+    "stage": "Negotiation",
+    "health": "watch",
+    "signals": ["reduced champion engagement", "competitor trial detected"],
+    "suggested_next_question": "Reconnect with champion on workspace consolidation timeline?"
+  },
+  {
+    "id": "acct_linear",
+    "name": "Linear",
+    "domain": "linear.app",
+    "stage": "Discovery",
+    "health": "growth",
+    "signals": ["hiring Engineering Manager", "PLG signup spike"],
+    "suggested_next_question": "Map buying committee for cross-team rollout?"
+  }
+]

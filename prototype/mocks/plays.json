@@ -1,0 +1,30 @@
+[
+  {
+    "id": "play_champion_activation",
+    "title": "Champion Activation Sprint",
+    "tags": ["fintech", "high-intent", "expansion"],
+    "signals": ["recent funding", "hiring CTO", "vendor evaluation"],
+    "summary": "Re-engage champions after funding with a concise enablement sprint."
+  },
+  {
+    "id": "play_security_compliance_push",
+    "title": "Security & Compliance Signals",
+    "tags": ["security", "compliance", "enterprise"],
+    "signals": ["SOC2", "HIPAA readiness", "new CISO hire"],
+    "summary": "Target accounts broadcasting security or compliance milestones."
+  },
+  {
+    "id": "play_saas_growth_signals",
+    "title": "SaaS Expansion Play",
+    "tags": ["saas", "growth", "product-led"],
+    "signals": ["new SKU", "PLG funnel expansion", "APAC landing"],
+    "summary": "Focus on SaaS teams expanding product surface area or geography."
+  },
+  {
+    "id": "play_revops_pipeline_cleanup",
+    "title": "Pipeline Hygiene Revival",
+    "tags": ["revenue_ops", "pipeline", "crm"],
+    "signals": ["stalled deals", "forecast variance", "territory change"],
+    "summary": "Help RevOps tighten pipeline stages with intent-based plays."
+  }
+]
