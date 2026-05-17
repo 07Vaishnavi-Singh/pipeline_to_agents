@@ -1,26 +1,16 @@
-"""
-agents/creator.py — Play Creator agent (PLAN §7).
-
-Problem C fix — tool ownership:
-  _icp_from() is the mock ICP builder. Only this agent calls it.
-
-Problem B fix — artifact slicing:
-  Creator reads inp.artifacts["recommender"] and inp.artifacts["analyst"]
-  but ONLY because AGENT_INPUT_DEPS["creator"] = ["recommender", "analyst"].
-  The coordinator filters CoordinatorState down to just those keys before
-  building AgentInput. Creator never sees the full coordinator state.
-"""
-
 from __future__ import annotations
+
+try:
+    from langsmith import traceable as _traceable
+except ImportError:
+    def _traceable(**_kw):  # type: ignore[misc]
+        def _wrap(fn): return fn
+        return _wrap
 
 from state import AgentArtifact, AgentInput, MemoryDelta
 
 
 def _icp_from(goal: str) -> dict:
-    """
-    Mock ICP + intent signal builder.
-    In production: calls Recepto's ICP API with the user's goal.
-    """
     g = goal.lower()
     verticals = (
         ["fintech"]   if "fintech" in g else
@@ -43,14 +33,13 @@ def _icp_from(goal: str) -> dict:
     }
 
 
+@_traceable(name="run_creator", run_type="tool")
 def run_creator(inp: AgentInput) -> tuple[AgentArtifact, list[MemoryDelta]]:
     warnings: list[str] = []
 
-    # Read upstream artifacts passed by the coordinator (not fetched directly)
     rec_artifact  = inp.artifacts.get("recommender")
     acct_artifact = inp.artifacts.get("analyst")
 
-    # Seed the play from the top recommendation if available
     seed_play_id: str | None = None
     if rec_artifact and rec_artifact.get("status") == "ok":
         candidates   = rec_artifact.get("payload", {}).get("candidates") or []

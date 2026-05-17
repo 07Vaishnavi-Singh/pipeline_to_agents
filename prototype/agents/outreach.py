@@ -1,28 +1,18 @@
-"""
-agents/outreach.py — Outreach Strategist agent (PLAN §7).
-
-Problem C fix — tool ownership:
-  _analytics_fetch() and _notion_lookup() are private to this agent.
-  No other agent calls these functions.
-
-Note: analytics uses a hash of the query for deterministic-but-varied
-mock numbers — useful for demos where you run the same query twice
-and expect consistent output.
-"""
-
 from __future__ import annotations
 
 import hashlib
+
+try:
+    from langsmith import traceable as _traceable
+except ImportError:
+    def _traceable(**_kw):  # type: ignore[misc]
+        def _wrap(fn): return fn
+        return _wrap
 
 from state import AgentArtifact, AgentInput, MemoryDelta
 
 
 def _analytics_fetch(query: str) -> dict:
-    """
-    Mock analytics fetch.
-    In production: calls Recepto analytics API for outreach performance data.
-    Uses a stable hash so the same query always returns the same numbers.
-    """
     h = int(hashlib.sha256(query.encode()).hexdigest(), 16)
     return {
         "open_rate":          round(0.35 + (h % 40) / 100, 2),
@@ -32,10 +22,6 @@ def _analytics_fetch(query: str) -> dict:
 
 
 def _notion_lookup(_playbook_key: str) -> list[str]:
-    """
-    Mock Notion playbook lookup.
-    In production: reads from the Recepto Notion workspace via Notion MCP.
-    """
     return [
         "Founder-to-champion double touch (48h cadence)",
         "Intent-led hook + social proof block",
@@ -43,6 +29,7 @@ def _notion_lookup(_playbook_key: str) -> list[str]:
     ]
 
 
+@_traceable(name="run_outreach", run_type="tool")
 def run_outreach(inp: AgentInput) -> tuple[AgentArtifact, list[MemoryDelta]]:
     perf      = _analytics_fetch(inp.user_query)
     playbooks = _notion_lookup("gtm_core")

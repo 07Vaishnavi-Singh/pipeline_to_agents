@@ -1,29 +1,21 @@
-"""
-agents/recommender.py — Play Recommender agent (PLAN §7).
-
-Problem C fix — tool ownership:
-  _kb_search() is defined here and used only here.
-  No other agent imports this function or reads plays.json directly.
-  If the coordinator needs this agent's output, it gets it through the
-  AgentArtifact returned to CoordinatorState — never via a direct import.
-"""
-
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
+try:
+    from langsmith import traceable as _traceable
+except ImportError:
+    def _traceable(**_kw):  # type: ignore[misc]
+        def _wrap(fn): return fn
+        return _wrap
+
 from state import AgentArtifact, AgentInput, MemoryDelta
 
-# Private tool — owned exclusively by this agent.
 _PLAYS_PATH = Path(__file__).resolve().parent.parent / "mocks" / "plays.json"
 
 
 def _kb_search(query: str) -> list[dict]:
-    """
-    Keyword-scored search over the mock Recepto KB.
-    In production: vector search or Recepto's real KB API.
-    """
     text = query.lower()
     with _PLAYS_PATH.open(encoding="utf-8") as f:
         plays: list[dict] = json.load(f)
@@ -37,16 +29,15 @@ def _kb_search(query: str) -> list[dict]:
             play.get("summary", ""),
         ]).lower()
         score = sum(1 for tok in set(text.split()) if len(tok) > 2 and tok in blob)
-        # Tag exact-match bonus — tags are the strongest signal
         if any(t in text for t in play.get("tags", [])):
             score += 2
         scored.append((score, play))
 
     scored.sort(key=lambda x: x[0], reverse=True)
-    # Return plays with a positive score; fall back to top 2 if nothing matched
     return [p for s, p in scored if s > 0] or [p for _, p in scored[:2]]
 
 
+@_traceable(name="run_recommender", run_type="tool")
 def run_recommender(inp: AgentInput) -> tuple[AgentArtifact, list[MemoryDelta]]:
     candidates = _kb_search(inp.user_query)
     top = candidates[:3]
@@ -62,7 +53,6 @@ def run_recommender(inp: AgentInput) -> tuple[AgentArtifact, list[MemoryDelta]]:
         status="ok",
     )
 
-    # Propose M1 memory delta — coordinator will decide whether to commit
     deltas: list[MemoryDelta] = []
     industry = inp.entities.get("industry")
     if industry:

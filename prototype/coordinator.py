@@ -1,28 +1,3 @@
-"""
-coordinator.py — LangGraph StateGraph coordinator (PLAN §2–§6).
-
-This is the core of the prototype. It demonstrates all three problem solutions:
-
-  Problem B (shared state):
-    decompose_node, run_wave_node, synthesize_node all operate on
-    CoordinatorState. Agents never touch this state directly — they receive
-    an AgentInput slice and return (AgentArtifact, list[MemoryDelta]).
-
-  Problem C (tool bleed):
-    Each agent is a plain function (run_recommender, run_creator, etc.).
-    The coordinator calls them via AGENT_RUNNERS. Agents don't import each
-    other and don't share a tool registry.
-
-  Problem D (parallel vs sequential):
-    _build_execution_waves() reads DEPENDENCY_SEQUENTIAL_FROMS and runs
-    a topological sort to produce execution waves. Agents in the same wave
-    run in parallel via ThreadPoolExecutor. Waves run sequentially.
-
-Graph shape:
-  START → decompose → build_dag → run_wave ⟲ → synthesize → END
-                                   (loops until all waves done)
-"""
-
 from __future__ import annotations
 
 import uuid
@@ -37,6 +12,7 @@ from agents.analyst import run_analyst
 from agents.creator import run_creator
 from agents.outreach import run_outreach
 from agents.recommender import run_recommender
+from llm import llm_decompose, llm_synthesize
 from memory import MemoryStore
 from state import (
     DEPENDENCY_SEQUENTIAL_FROMS,
@@ -49,12 +25,6 @@ from state import (
     MemoryDelta,
 )
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-# Stable ordering for intents — used when sorting within a wave so trace output
-# is deterministic (important for readable logs during the interview demo).
 _INTENT_STAGE_ORDER = [
     IntentKind.RECOMMEND_PLAY.value,
     IntentKind.ANALYZE_ACCOUNT.value,
@@ -63,13 +33,10 @@ _INTENT_STAGE_ORDER = [
 ]
 _INTENT_RANK = {k: i for i, k in enumerate(_INTENT_STAGE_ORDER)}
 
-# Reverse map: agent_kind → intent string (used in _should_skip).
 _KIND_TO_INTENT = {v: k for k, v in INTENT_TO_AGENT_KIND.items()}
 
-# Global memory store — one instance per process (M1 scope = session).
-MEMORY_STORE = MemoryStore()
+MEMORY_STORE = MemoryStore(m2_db_path="memory_m2.db")
 
-# Agent runner registry (Problem C: coordinator dispatches, agents don't call each other).
 AGENT_RUNNERS: dict[str, Callable[[AgentInput], tuple[AgentArtifact, list[MemoryDelta]]]] = {
     "recommender": run_recommender,
     "creator":     run_creator,
@@ -78,25 +45,16 @@ AGENT_RUNNERS: dict[str, Callable[[AgentInput], tuple[AgentArtifact, list[Memory
 }
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 def _trace(state: CoordinatorState) -> str:
     return state["request"]["trace_id"]
 
 
 def _dedupe_stable(items: list[str]) -> list[str]:
-    """Remove duplicates while preserving order."""
     seen: set[str] = set()
     return [x for x in items if not (x in seen or seen.add(x))]  # type: ignore[func-returns-value]
 
 
 def _extract_entities(query: str) -> dict[str, str]:
-    """
-    Rule-based entity extractor (no LLM for prototype).
-    In production this would be an LLM call or a NER model.
-    """
     q = query.lower()
     ent: dict[str, str] = {}
     if "fintech" in q:
@@ -108,19 +66,7 @@ def _extract_entities(query: str) -> dict[str, str]:
     return ent
 
 
-# ---------------------------------------------------------------------------
-# Node 1: decompose
-# ---------------------------------------------------------------------------
-
 def _decompose_natural_language(query: str) -> tuple[list[str], dict[str, str]]:
-    """
-    Rule-based NL classifier → (ordered intent list, entities).
-
-    Routing logic mirrors the dependency table: if recommend+create are
-    both present, RECOMMEND must precede CREATE (enforced in build_dag via
-    DEPENDENCY_SEQUENTIAL_FROMS). Analyst+outreach have no dependency so
-    they land in the same wave in build_dag.
-    """
     q = query.lower()
     intents: set[str] = set()
     entities = _extract_entities(query)
@@ -131,15 +77,12 @@ def _decompose_natural_language(query: str) -> tuple[list[str], dict[str, str]]:
     create_cues    = any(w in q for w in ["create a play", "create it", "draft a play", "build a play", "then create"])
 
     if outreach_cues and ("stripe" in q or "analyze" in q or "account" in q):
-        # Scenario 3: parallel — analyst + outreach have no dependency
         intents.add(IntentKind.ANALYZE_ACCOUNT.value)
         intents.add(IntentKind.RECOMMEND_OUTREACH.value)
     elif recommend_cues and create_cues:
-        # Scenario 2: sequential — recommend must finish before create
         intents.add(IntentKind.RECOMMEND_PLAY.value)
         intents.add(IntentKind.CREATE_PLAY.value)
     elif analyze_cues and create_cues:
-        # Scenario 4: sequential — analyst must finish before create
         intents.add(IntentKind.ANALYZE_ACCOUNT.value)
         intents.add(IntentKind.CREATE_PLAY.value)
     elif outreach_cues:
@@ -153,7 +96,6 @@ def _decompose_natural_language(query: str) -> tuple[list[str], dict[str, str]]:
     elif create_cues:
         intents.add(IntentKind.CREATE_PLAY.value)
     else:
-        # Default: recommend a play
         intents.add(IntentKind.RECOMMEND_PLAY.value)
 
     ordered = sorted(intents, key=lambda i: _INTENT_RANK.get(i, 99))
@@ -161,15 +103,6 @@ def _decompose_natural_language(query: str) -> tuple[list[str], dict[str, str]]:
 
 
 def decompose_node(state: CoordinatorState) -> CoordinatorState:
-    """
-    Entry node for every request (direct tool or ask_recepto).
-
-    Direct tool: intent is already known → skip NL decompose, build single-node DAG.
-    ask_recepto: run NL classifier → may produce 1–4 intents.
-
-    Both paths go through the coordinator so every request gets a trace_id
-    and produces artifacts in CoordinatorWorkingMemory.
-    """
     req = state["request"]
     tool = req["tool_name"]
     print(f"[trace_id={req['trace_id']}] decompose ← tool={tool}")
@@ -177,7 +110,6 @@ def decompose_node(state: CoordinatorState) -> CoordinatorState:
     entities = _extract_entities(req["user_query"])
 
     if tool != "ask_recepto":
-        # Direct tool: shallow-wrap — intent is pre-known, no NL needed
         intent = DIRECT_TOOL_TO_INTENT.get(tool)
         if intent is None:
             raise ValueError(f"Unknown direct tool: `{tool}`")
@@ -185,36 +117,24 @@ def decompose_node(state: CoordinatorState) -> CoordinatorState:
         print(f"[trace_id={req['trace_id']}] decompose → intents (direct): {intents_list}")
         return CoordinatorState(**{**dict(state), "intents": intents_list, "entities": entities})
 
-    intents_list, nl_entities = _decompose_natural_language(req["user_query"])
-    merged = {**entities, **nl_entities}
-    print(f"[trace_id={req['trace_id']}] decompose → intents (NL): {intents_list} entities={merged}")
+    llm_result = llm_decompose(req["user_query"])
+    if llm_result is not None:
+        valid = {i.value for i in IntentKind}
+        raw_intents = [i for i in (llm_result.get("intents") or []) if i in valid]
+        intents_list = _dedupe_stable(raw_intents) or [IntentKind.RECOMMEND_PLAY.value]
+        merged = {**entities, **{k: v for k, v in (llm_result.get("entities") or {}).items() if v}}
+        print(f"[trace_id={req['trace_id']}] decompose → intents (LLM): {intents_list} entities={merged}")
+    else:
+        intents_list, nl_entities = _decompose_natural_language(req["user_query"])
+        merged = {**entities, **nl_entities}
+        print(f"[trace_id={req['trace_id']}] decompose → intents (rule-based): {intents_list} entities={merged}")
     return CoordinatorState(**{**dict(state), "intents": intents_list, "entities": merged})
 
 
-# ---------------------------------------------------------------------------
-# Node 2: build_dag
-# ---------------------------------------------------------------------------
-
 def _build_execution_waves(intents: list[str], trace: str) -> tuple[list[list[str]], list[dict]]:
-    """
-    Topological sort over DEPENDENCY_SEQUENTIAL_FROMS → execution waves.
-
-    Each wave is a list of agent_kinds that can run in parallel.
-    Waves themselves run sequentially (wave N+1 starts only after wave N completes).
-
-    Example — intents=[recommend_play, create_play]:
-      prereqs: create_play depends on recommend_play
-      Wave 1: [recommender]   ← no prerequisites
-      Wave 2: [creator]       ← waits for recommender
-
-    Example — intents=[analyze_account, recommend_outreach]:
-      prereqs: none (neither depends on the other)
-      Wave 1: [analyst, outreach]  ← both independent, run in parallel
-    """
     intents_u = _dedupe_stable(intents)
     intent_set = set(intents_u)
 
-    # Build prerequisite map from the dependency table
     prereq: dict[str, set[str]] = {i: set() for i in intents_u}
     for (left, right), is_sequential in DEPENDENCY_SEQUENTIAL_FROMS.items():
         if is_sequential and left in intent_set and right in intent_set:
@@ -223,14 +143,13 @@ def _build_execution_waves(intents: list[str], trace: str) -> tuple[list[list[st
     placed: set[str] = set()
     waves_agents: list[list[str]] = []
     serialized: list[dict] = []
-    safety = 0  # guard against infinite loop from a malformed dependency table
+    safety = 0
 
     while len(placed) < len(intent_set):
         safety += 1
         if safety > 32:
             raise RuntimeError(f"DAG cycle or unsatisfiable intents: {intents_u}")
 
-        # All intents whose prerequisites are already placed
         layer = [
             x for x in sorted(intent_set, key=lambda k: _INTENT_RANK.get(k, 99))
             if x not in placed and prereq.get(x, set()).issubset(placed)
@@ -256,12 +175,7 @@ def build_dag_node(state: CoordinatorState) -> CoordinatorState:
     return CoordinatorState(**{**dict(state), "waves": waves, "wave_index": 0, "plan_dag": plan})
 
 
-# ---------------------------------------------------------------------------
-# Node 3: run_wave  (loops until all waves are done)
-# ---------------------------------------------------------------------------
-
 def _skipped_artifact(agent_kind: str, trace_id: str, reason: str) -> AgentArtifact:
-    """Create a skipped artifact — used when a prerequisite agent failed."""
     return AgentArtifact(
         agent_kind=agent_kind,
         step_id=f"{trace_id}:{agent_kind}",
@@ -272,17 +186,9 @@ def _skipped_artifact(agent_kind: str, trace_id: str, reason: str) -> AgentArtif
 
 
 def _should_skip(intent: str, intents_set: set[str], artifacts: dict[str, dict]) -> tuple[bool, str | None]:
-    """
-    Check whether this intent should be skipped because a required upstream
-    agent did not produce a successful artifact.
-
-    This is how failure propagates cleanly (Problem B fix):
-    instead of an exception crashing the whole pipeline, downstream agents
-    are simply marked 'skipped' with a clear reason.
-    """
     for left in intents_set:
         if not DEPENDENCY_SEQUENTIAL_FROMS.get((left, intent)):
-            continue  # no sequential dependency from `left` to `intent`
+            continue
         upstream_kind = INTENT_TO_AGENT_KIND[left]
         upstream_artifact = artifacts.get(upstream_kind)
         if upstream_artifact is None or upstream_artifact.get("status") != "ok":
@@ -293,12 +199,6 @@ def _should_skip(intent: str, intents_set: set[str], artifacts: dict[str, dict])
 def _run_one_agent(
     agent_kind: str, state: CoordinatorState
 ) -> tuple[AgentArtifact, list[MemoryDelta]]:
-    """
-    Run a single agent:
-      1. Check if it should be skipped (upstream failed)
-      2. Build a coordinator-controlled AgentInput slice
-      3. Call the agent runner
-    """
     req          = state["request"]
     entities     = dict(state.get("entities") or {})
     artifacts    = dict(state.get("artifacts") or {})
@@ -314,10 +214,6 @@ def _run_one_agent(
 
 
 def run_wave_node(state: CoordinatorState) -> CoordinatorState:
-    """
-    Execute one wave. Agents in the same wave run in parallel (ThreadPoolExecutor).
-    Results are merged back into CoordinatorState via the Annotated reducers.
-    """
     req    = state["request"]
     trace  = req["trace_id"]
     waves  = state.get("waves") or []
@@ -348,22 +244,12 @@ def run_wave_node(state: CoordinatorState) -> CoordinatorState:
 
 
 def _route_after_wave(state: CoordinatorState) -> Literal["again", "synthesize"]:
-    """Conditional edge: loop run_wave until all waves are exhausted."""
     wi    = state.get("wave_index", 0)
     waves = state.get("waves") or []
     return "again" if wi < len(waves) else "synthesize"
 
 
-# ---------------------------------------------------------------------------
-# Node 4: synthesize
-# ---------------------------------------------------------------------------
-
 def synthesize_node(state: CoordinatorState) -> CoordinatorState:
-    """
-    Final node:
-      1. Merge all artifact payloads into a human-readable response
-      2. Review and commit pending MemoryDeltas to the M1 session store
-    """
     req       = state["request"]
     trace     = req["trace_id"]
     artifacts = dict(state.get("artifacts") or {})
@@ -401,9 +287,15 @@ def synthesize_node(state: CoordinatorState) -> CoordinatorState:
                 f"stage={snap.get('stage')} health={snap.get('health')} signals={signals}"
             )
 
-    final_response = "\n".join(parts) if parts else "No outputs produced."
+    template_response = "\n".join(parts) if parts else "No outputs produced."
 
-    # Coordinator reviews and commits pending memory deltas (Problem B: gated writes)
+    llm_response = llm_synthesize(req["user_query"], artifacts)
+    if llm_response:
+        print(f"[trace_id={trace}] synthesize → using LLM response")
+        final_response = llm_response
+    else:
+        final_response = template_response
+
     session_id = req.get("session_id")
     raw_deltas = state.get("pending_memory_deltas") or []
     deltas = [
@@ -421,10 +313,6 @@ def synthesize_node(state: CoordinatorState) -> CoordinatorState:
 
     return CoordinatorState(**{**dict(state), "final_response": final_response})
 
-
-# ---------------------------------------------------------------------------
-# Graph assembly
-# ---------------------------------------------------------------------------
 
 def _build_coordinator_graph() -> StateGraph:
     g = StateGraph(CoordinatorState)
@@ -444,10 +332,6 @@ def _build_coordinator_graph() -> StateGraph:
 _COORDINATOR = _build_coordinator_graph().compile()
 
 
-# ---------------------------------------------------------------------------
-# Public entry point
-# ---------------------------------------------------------------------------
-
 def run_request(
     user_query: str,
     *,
@@ -456,14 +340,6 @@ def run_request(
     session_id: str | None = None,
     trace_id:   str | None = None,
 ) -> CoordinatorState:
-    """
-    Main entry point. Called by direct MCP tools and by ask_recepto.
-
-    Both paths shallow-wrap through the coordinator so every request has:
-      - A trace_id for log correlation
-      - Artifacts in CoordinatorWorkingMemory
-      - Memory writes gated through synthesize_node
-    """
     trace = trace_id or uuid.uuid4().hex[:12]
     initial: CoordinatorState = {
         "request": {

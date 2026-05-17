@@ -1,31 +1,21 @@
-"""
-agents/analyst.py — Account Analyst agent (PLAN §7).
-
-Problem C fix — tool ownership:
-  _platform_lookup() is private to this agent.
-  Only this agent reads mocks/accounts.json.
-
-Failure behaviour (Problem B fix):
-  When no account is found, the agent returns status="failed" with a
-  clear error message — it does NOT raise an exception.
-  The coordinator's _should_skip() detects the failed artifact and marks
-  downstream dependent agents (e.g. creator) as "skipped" with a reason.
-  This is how partial DAG failure works: explicit, observable, no crash.
-"""
-
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
+try:
+    from langsmith import traceable as _traceable
+except ImportError:
+    def _traceable(**_kw):  # type: ignore[misc]
+        def _wrap(fn): return fn
+        return _wrap
+
 from state import AgentArtifact, AgentInput, MemoryDelta
 
-# Private tool — owned exclusively by this agent.
 _ACCOUNTS_PATH = Path(__file__).resolve().parent.parent / "mocks" / "accounts.json"
 
 
 def _infer_account_from_query(query: str) -> str | None:
-    """Heuristic: extract a known account name from free text."""
     q = query.lower()
     for name in ("stripe", "notion", "linear"):
         if name in q:
@@ -34,16 +24,6 @@ def _infer_account_from_query(query: str) -> str | None:
 
 
 def _platform_lookup(query: str, entities: dict[str, str]) -> dict | None:
-    """
-    Look up an account in mocks/accounts.json.
-    In production: calls Recepto's platform APIs.
-
-    Lookup priority:
-      1. entities["account_name"] (extracted by coordinator's decompose node)
-      2. _infer_account_from_query (local heuristic for known names)
-      3. Substring search (when no explicit account name was detected at all)
-      4. None — fail cleanly if nothing matched
-    """
     needle = (
         entities.get("account_name")
         or entities.get("account")
@@ -54,16 +34,12 @@ def _platform_lookup(query: str, entities: dict[str, str]) -> dict | None:
     with _ACCOUNTS_PATH.open(encoding="utf-8") as f:
         accounts: list[dict] = json.load(f)
 
-    # Direct match on name or domain
     for acct in accounts:
         if needle and needle in (acct.get("name") or "").lower():
             return acct
         if needle and needle in (acct.get("domain") or "").lower():
             return acct
 
-    # If no explicit needle was found, try substring search against the raw query.
-    # This covers edge cases like "what's going on at stripe.com?" where the
-    # coordinator didn't extract an entity but the query mentions a known account.
     if not needle:
         q = query.lower()
         for acct in accounts:
@@ -71,17 +47,14 @@ def _platform_lookup(query: str, entities: dict[str, str]) -> dict | None:
             if name and name in q:
                 return acct
 
-    # No match — return None so run_analyst sets status="failed"
     return None
 
 
+@_traceable(name="run_analyst", run_type="tool")
 def run_analyst(inp: AgentInput) -> tuple[AgentArtifact, list[MemoryDelta]]:
     row = _platform_lookup(inp.user_query, inp.entities)
 
     if not row:
-        # Clean failure — no exception, just a failed artifact with a reason.
-        # Downstream agents that depend on this artifact will be skipped
-        # (see _should_skip in coordinator.py).
         return AgentArtifact(
             agent_kind="analyst",
             step_id=f"{inp.trace_id}:analyst",
@@ -110,10 +83,18 @@ def run_analyst(inp: AgentInput) -> tuple[AgentArtifact, list[MemoryDelta]]:
         status="ok",
     )
 
-    deltas = [MemoryDelta(
-        tier="M1",
-        key="last_account_viewed",
-        value=row["name"],
-        reason="Captured last analyzed account for session hints.",
-    )]
+    deltas = [
+        MemoryDelta(
+            tier="M1",
+            key="last_account_viewed",
+            value=row["name"],
+            reason="Captured last analyzed account for session hints.",
+        ),
+        MemoryDelta(
+            tier="M2",
+            key="last_account_viewed",
+            value=row["name"],
+            reason="Durable hint for cross-session account context.",
+        ),
+    ]
     return artifact, deltas
