@@ -417,17 +417,3 @@ Plan for the coordinator to:
 - **Full four-agent plan:** see **Full four-agent implementation plan (planning only)** — complete the pre-implementation checklist there before production hardening.  
 - **Smallest demo:** **Prototype brainstorm** + `main.py` scenarios cover the PLAN §11 paths.
 
----
-
-## What’s next (suggested order)
-
-1. Walk through **Full four-agent implementation plan** with Dhruv (or your lead) and tick the **pre-implementation checklist**.  
-2. Lock **prototype option** (A / B / C or B+C) if you still want an early teaser demo in parallel with P0.  
-3. When approved: execute **phase P0 → P5** in order—see phase table in the plan.  
-4. Wire **real Recepto** APIs when available; replace mocks behind tool interfaces—no change to coordinator contracts if artifacts stay stable.  
-
----
-
-## License / compliance note
-
-Integration with recepto.ai must follow **their terms** (subscription APIs, no scraping around documented surfaces). Mark mocks clearly in demos.
