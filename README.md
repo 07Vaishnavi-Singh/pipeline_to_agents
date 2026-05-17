@@ -1,4 +1,4 @@
-# Recepto MCP — Pipeline → Agents Migration
+#  MCP — Pipeline → Agents Migration
 
 **What this document is:** a **pipeline → agents conversion guide**—how today’s fixed GTM flows become a **coordinator + four specialist agents + MCP**, including memory/context and how work is handed off **without** turning everything into one brittle script.
 
